@@ -1,74 +1,61 @@
 (function () {
     'use strict';
 
-    function initLampaUaFilter() {
-        console.log('LampaUaFilter: Модуль синхронної фільтрації стрічок запущено.');
+    function initUkrVoiceFilter() {
+        console.log('UkrVoiceFilter: Запущено логіку Боді з фільтрацією за озвучкою.');
 
-        // Функція жорсткої перевірки картки за текстовими маркерами
-        function isNotUkrainian(item) {
-            if (!item) return true;
+        // Головна функція перевірки звуку
+        function hasNoUkrainianVoice(data) {
+            if (!data) return true;
 
-            var title = (item.title || item.name || '').toLowerCase();
-            var overview = (item.overview || '').toLowerCase();
-            var lang = (item.original_language || '').toLowerCase();
-
-            // 1. Якщо оригінальна мова українська — фільм стовідсотково наш
+            // Якщо фільм виробництва України або мова оригінальна українська — залишаємо
+            var lang = (data.original_language || '').toLowerCase();
             if (lang === 'uk' || lang === 'ua') return false;
 
-            // 2. Шукаємо специфічні українські літери (і, ї, є, ґ) або прямі текстові теги
-            var hasUkrSpecific = /[іїєґІЇЄҐ]/.test(overview + ' ' + title);
-            var hasUkrTags = /ukr|ua|ukrainian|украї|укр/i.test(title + ' ' + overview);
+            // 1. Перевіряємо вбудовані мітки озвучки, які CUB передає разом із карткою
+            // Скануємо всі текстові поля об'єкта, де балансери пишуть мову звуку (перекладу)
+            var checkString = '';
+            
+            if (data.translation) checkString += ' ' + data.translation;
+            if (data.translations && data.translations.length) checkString += ' ' + data.translations.join(' ');
+            if (data.sound) checkString += ' ' + data.sound;
+            if (data.quality) checkString += ' ' + data.quality;
+            if (data.streams) checkString += ' ' + JSON.stringify(data.streams);
+            
+            // Також перевіряємо назву — іноді туди вшивають тег [Ukr] або [Дубляж]
+            var title = (data.title || data.name || '').toLowerCase();
+            checkString = (checkString + ' ' + title).toLowerCase();
 
-            if (hasUkrSpecific || hasUkrTags) return false;
+            // Шукаємо прямі маркери наявності української звукової доріжки
+            var hasUkrVoice = /ukr|ua|ukrainian|украї|дубляж|укр/i.test(checkString);
 
-            // 3. Якщо опис містить російські літери-маркери (ё, ы, ъ, э) — ховаємо безжально
-            if (/[ёыъэ]/i.test(overview)) return true;
+            if (hasUkrVoice) {
+                return false; // Озвучка є, фільм залишаємо
+            }
 
-            // 4. Якщо опис суто російський (кирилиця без жодної української літери) — ховаємо,
-            // щоб на головній не висіли релізи, які ще не перекладені українською спільнотою
-            if (/[а-я]/i.test(overview) && !hasUkrSpecific) return true;
-
-            // 5. Якщо опис повністю англійською мовою (латиниця) або пустий — фільм ще не вийшов в Україні
-            if (!overview || overview.length < 15 || /^[a-zA-Z0-9\s,.:;!?#%&*()-_=+]*$/.test(overview)) return true;
-
-            return false;
+            // 2. Якщо в об'єкті картки взагалі немає жодних даних про український звук —
+            // це означає, що релізу з українською озвучкою в базі CUB для цього фільму ще немає. Ховаємо.
+            return true; 
         }
 
-        // Перехоплення та миттєва фільтрація потоку даних з CUB / TMDB
-        Lampa.Hooks.add('component_create', function (object) {
-            if (object.component === 'main' || object.component === 'category') {
-                if (object.instance && object.instance.append) {
-                    var originalAppend = object.instance.append;
-
-                    object.instance.append = function (data) {
-                        if (data && data.items && data.items.length) {
-                            // Залишаємо у масиві тільки те, що пройшло перевірку
-                            data.items = data.items.filter(function (movie) {
-                                return !isNotUkrainian(movie);
-                            });
-                        }
-                        return originalAppend.call(object.instance, data);
-                    };
-                }
-            }
-        });
-
-        // Пряме видалення постерів з екрана, якщо вони проскочили початковий хук
+        // КАРКАС БОДІ: Перехоплюємо ініціалізацію кожної картки (Card)
         if (window.Lampa && Lampa.Card) {
             var originalCardInit = Lampa.Card.prototype.init;
             
             Lampa.Card.prototype.init = function (data) {
-                if (isNotUkrainian(data)) {
-                    data.hide_card = true;
+                // Якщо немає української озвучки в даних — маркуємо картку на приховування
+                if (hasNoUkrainianVoice(data)) {
+                    data.hide_card = true; 
                 }
 
+                // Запускаємо базовий рендерер Lampa
                 originalCardInit.call(this, data);
 
+                // ОДИН В ОДИН ЯК У БОДІ: Якщо мітка активна, повністю стираємо елемент з екрана
                 if (data.hide_card && this.render) {
                     var element = this.render();
-                    if (element) {
-                        if (element.remove) element.remove();
-                        else if (element.css) element.css('display', 'none');
+                    if (element && element.remove) {
+                        element.remove(); // Фізично видаляємо постер з сітки на Samsung Tizen
                     }
                 }
             };
@@ -76,10 +63,10 @@
     }
 
     if (window.appready) {
-        initLampaUaFilter();
+        initUkrVoiceFilter();
     } else {
         Lampa.Listener.follow('app', function (e) {
-            if (e.type === 'ready') initLampaUaFilter();
+            if (e.type === 'ready') initUkrVoiceFilter();
         });
     }
 })();
