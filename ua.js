@@ -1,71 +1,85 @@
 (function () {
     'use strict';
 
-    function startUkrVoiceFilter() {
-        console.log('UkrVoiceFilter: Модуль перевірки наявності озвучки запущено.');
+    function initLampaUaFilter() {
+        console.log('LampaUaFilter: Модуль синхронної фільтрації стрічок запущено.');
 
-        // Функція, яка заглядає в онлайн-плеєр та шукає український звук
-        function hasNoUkrainianVoice(movie, callback) {
-            if (!movie) return callback(true);
+        // Функція жорсткої перевірки картки за текстовими маркерами
+        function isNotUkrainian(item) {
+            if (!item) return true;
 
-            // Якщо фільм оригінально український — залишаємо без перевірок
-            if (movie.original_language === 'uk' || movie.original_language === 'ua') {
-                return callback(false);
-            }
+            var title = (item.title || item.name || '').toLowerCase();
+            var overview = (item.overview || '').toLowerCase();
+            var lang = (item.original_language || '').toLowerCase();
 
-            var id = movie.id;
-            var type = movie.number_of_seasons ? 'tv' : 'movie';
+            // 1. Якщо оригінальна мова українська — фільм стовідсотково наш
+            if (lang === 'uk' || lang === 'ua') return false;
 
-            // Робимо фоновий запит до універсального онлайн-парсеру Lampa
-            Lampa.Background.fetch({
-                url: 'https://cub.watch' + id + '&type=' + type
-            }, function (response) {
-                if (response && response.data) {
-                    // Перетворюємо всі дані про доступні озвучки та переклади в один рядок
-                    var allVoices = JSON.stringify(response.data).toLowerCase();
-                    
-                    // Шукаємо прямі маркери українського звуку
-                    var hasVoice = /ukr|ua|ukrainian|украї|дубляж/i.test(allVoices);
-                    
-                    if (hasVoice) {
-                        return callback(false); // Звук є, ховати не потрібно
-                    }
-                }
-                callback(true); // Української озвучки немає — ховаємо картку
-            }, function () {
-                // Якщо сервер онлайн-балансерів тимчасово не відповів, залишаємо картку
-                callback(false);
-            });
+            // 2. Шукаємо специфічні українські літери (і, ї, є, ґ) або прямі текстові теги
+            var hasUkrSpecific = /[іїєґІЇЄҐ]/.test(overview + ' ' + title);
+            var hasUkrTags = /ukr|ua|ukrainian|украї|укр/i.test(title + ' ' + overview);
+
+            if (hasUkrSpecific || hasUkrTags) return false;
+
+            // 3. Якщо опис містить російські літери-маркери (ё, ы, ъ, э) — ховаємо безжально
+            if (/[ёыъэ]/i.test(overview)) return true;
+
+            // 4. Якщо опис суто російський (кирилиця без жодної української літери) — ховаємо,
+            // щоб на головній не висіли релізи, які ще не перекладені українською спільнотою
+            if (/[а-я]/i.test(overview) && !hasUkrSpecific) return true;
+
+            // 5. Якщо опис повністю англійською мовою (латиниця) або пустий — фільм ще не вийшов в Україні
+            if (!overview || overview.length < 15 || /^[a-zA-Z0-9\s,.:;!?#%&*()-_=+]*$/.test(overview)) return true;
+
+            return false;
         }
 
-        // Перехоплюємо рендеринг кожної картки (постера) на екрані Samsung Tizen
+        // Перехоплення та миттєва фільтрація потоку даних з CUB / TMDB
+        Lampa.Hooks.add('component_create', function (object) {
+            if (object.component === 'main' || object.component === 'category') {
+                if (object.instance && object.instance.append) {
+                    var originalAppend = object.instance.append;
+
+                    object.instance.append = function (data) {
+                        if (data && data.items && data.items.length) {
+                            // Залишаємо у масиві тільки те, що пройшло перевірку
+                            data.items = data.items.filter(function (movie) {
+                                return !isNotUkrainian(movie);
+                            });
+                        }
+                        return originalAppend.call(object.instance, data);
+                    };
+                }
+            }
+        });
+
+        // Пряме видалення постерів з екрана, якщо вони проскочили початковий хук
         if (window.Lampa && Lampa.Card) {
             var originalCardInit = Lampa.Card.prototype.init;
             
             Lampa.Card.prototype.init = function (data) {
-                var self = this;
+                if (isNotUkrainian(data)) {
+                    data.hide_card = true;
+                }
+
                 originalCardInit.call(this, data);
 
-                // Запускаємо фонову перевірку озвучки для цієї картки
-                hasNoUkrainianVoice(data, function (shouldHide) {
-                    if (shouldHide && self.render) {
-                        var element = self.render();
-                        if (element) {
-                            // Повністю видаляємо постер з екрана телевізора, якщо немає укр озвучки
-                            if (element.remove) element.remove();
-                            else if (element.css) element.css('display', 'none');
-                        }
+                if (data.hide_card && this.render) {
+                    var element = this.render();
+                    if (element) {
+                        if (element.remove) element.remove();
+                        else if (element.css) element.css('display', 'none');
                     }
-                });
+                }
             };
         }
     }
 
     if (window.appready) {
-        startUkrVoiceFilter();
+        initLampaUaFilter();
     } else {
         Lampa.Listener.follow('app', function (e) {
-            if (e.type === 'ready') startUkrVoiceFilter();
+            if (e.type === 'ready') initLampaUaFilter();
         });
     }
 })();
